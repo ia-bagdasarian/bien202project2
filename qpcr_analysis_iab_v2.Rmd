@@ -1,0 +1,371 @@
+---
+title: Automation of reverse-transcriptase qPCR Analysis
+output:html_document: default
+  
+---
+
+##### *Isabella Bagdasarian, BIEN202 Project 2*
+## **Introduction**
+  Quantitative PCR (qPCR) is a common molecular biology technique that measures the amplification and gene expression of a targeted DNA molecule. The TIME lab (PI: Dr. Joshua Morgan, Department of Bioengineering, University of California, Riverside) performs qPCR using a Mic Thermocycler that outputs cycling data in the form of a clunky excel workbook. Current lab methods to quantify qPCR data rely on manually transferring cycle threshold and sample data from the excel workbook to a separate pre-formatted spreadsheet containing the required formulas. This process becomes **tedious if datasets are large and is susceptible to user error and misentered data**. Further, these pre-formatted spreadsheets are **challenging for new users to adapt and understand**. To address this limitation **I aim to develop a semi-automated code that extracts relevant data** from the Mic generated excel workbook. This harvested data can then be used to solve for relative gene expression of the user's qPCR run using the delta-delta Ct method.   
+
+### **Framework for delta-delta Ct Analysis**
+Our goal is to determine how expression of target genes changes with different conditions. In order to control for error in qPCR efficiency we normalize to reference genes. Afterwards we can then compare the normalized Ct values to the reference gene and calculate relative gene expression to identify a fold change. This method relies on the assumption that amplication efficiency is perfect and consistent between the target and reference genes. The formula to solve for delta-delta Ct is as follows:
+
+
+
+$$
+\Delta\Delta C_T = \Delta C_{T,q} - \Delta C_{T,cb}
+$$
+After, we can solve for relative gene expression: 
+$$
+expression = 2^{-\Delta\Delta C_T}
+$$
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(error = FALSE, message = TRUE, fig.align = 'center', fig.height = 3.5, fig.width = 3.5)
+#knitr::opts_chunk$set(error = TRUE)
+```
+
+### **Getting Started**
+
+To begin, load the following packages into the library. 
+```{r load_readxl, eval=FALSE}
+#install package to read excel file
+#install.packages("readxl")
+#install.packages("stringi")
+
+#load library
+library(readxl)
+library(tidyverse)
+library(stringi)
+library(ggplot2)
+
+```
+<br/>
+
+#### *Collect User Inputs*
+Since this method of analysis relies on comparisons between reference genes and target genes, the user will be prompted to enter the following in the Rstudio Console:
+<br/> 
+**1.** How many experimental groups are there?
+<br/> 
+**2.** What are the group names?
+<br/> 
+**3.** How many reference genes are there?
+<br/> 
+**4.** What are the reference gene names?
+<br/> 
+<br/>
+Within the excel workbook exported by the Mic thermocycler, there will be specific sheets containg Ct data for each individual gene. This is the spreadsheet index. 
+<br/>
+<br/>
+**5.** What is the reference genes spreadsheet index?
+<br/> 
+**6.** How many target genes are there?
+<br/> 
+**7.** What are the target gene names?
+<br/> 
+**8.** What is the target genes spreadsheet index?
+
+
+```{r user_inputs, eval=FALSE}
+p1 = readline("How many experimental groups are there?")
+p1 = as.integer(p1)
+
+groupLabels =  matrix(NA, nrow=p1, ncol=1)
+for (p in 1:p1) {
+  groupLabels[p] = readline(sprintf("Experimental Group %d is: ",p))
+}
+print(paste("Experimental Groups include: ", groupLabels))
+
+p2 = readline("How many reference genes are there?")
+p2 = as.integer(p2)
+
+refLabels =  matrix(NA, nrow=p2, ncol=1)
+refSheet =  matrix(NA, nrow=p2, ncol=1)
+#create a label vector for reference genes
+for (p in 1:p2) {
+  refLabels[p] = readline(sprintf("Reference gene %d name is: ",p))
+  refSheet[p] = readline(sprintf("Reference gene %d spreadsheet index is: ",p))
+  refSheet[p] = as.integer(refSheet[p])
+}
+
+
+p3 = readline("How many target genes are there?")
+p3 = as.integer(p3)
+
+goiLabels =  matrix(NA, nrow=p2, ncol=1)
+goiSheet =  matrix(NA, nrow=p2, ncol=1)
+#create a label vector for reference genes
+for (p in 1:p3) {
+  goiLabels[p] = readline(sprintf("Target gene name %d is: ",p))
+  goiSheet[p] = readline(sprintf("Target gene %d spreadsheet index is: ",p))
+  goiSheet[p] = as.integer(goiSheet[p])
+}
+
+```
+
+After entering the required inputs into the Rstudio Console we will extract the required data directly from the excel workbook.  Input the .xlsx file here, it will be read using the read_excel command. The sheet index corresponds to the spreadsheet containing the sample and gene metadata. We will extract this data and identify the number and type of unique genes and experimental groups, as well as their corresponding well numbers. We assume that all qPCR runs measure each gene in triplicate. 
+
+```{r extract_data, eval=FALSE}
+#load specific sheets of qPCR data, file must be in current directory
+DATA <- read_excel("2019IB015_qPCR_20190217_annealingTemp57C.xlsx", sheet = 3) #sample metadata is stored in the 3rd sheet
+
+#columns 3-5 are the important ones, can we extract unique data then connect to corresponding well #?
+#lets find unique vars in the group column
+
+
+#lts try to use the tidyverse package to find unique group names
+#first we will remove the well number column and store the new dataframe in a seperate variable
+tempDF = DATA
+tempDF$Well <- NULL
+
+#generate a list of unique tokens, we will use these to search through original DATA dataframe and pull out well numbers of corresponding tokens. The numbr of rows is the numbr of unqiue samples generated in qPCR run.
+
+ #remove NTC and unknown data from matrix
+ tempDF2 = DATA
+ indi = (which(tempDF2$Groups != 'NA',arr.ind = TRUE))
+ allSamps = DATA[indi,]
+ allSamps$Well <- NULL
+ uniqueTokens = unique(allSamps)
+
+ t1 = as.matrix(uniqueTokens$Groups)
+ t2 = as.matrix(uniqueTokens$Assay)
+ test = cbind(t1,t2)
+ 
+ triplicates = matrix(NA, nrow=nrow(test), ncol=3) #change ncol based off of how many technical replicates you have, normally we have 3
+ sampleNames = matrix(NA, nrow=nrow(test), ncol=1)
+ 
+ #store well numbers in row of matrix
+ for (g in 1:nrow(test)){
+
+   triplicates[g,1:3] = which(DATA$Groups == test[g,1] & DATA$Assay ==test[g,2],arr.ind = TRUE) #unique sample/primers 
+   sampleNames[g,1]= paste(test[g,1],test[g,2])
+  
+ }
+ 
+ wellInfo = cbind(sampleNames,triplicates) #matrix where first column is sample info and columns 2:4 are sample wells
+ knitr::kable(wellInfo, col.names = c('Sample','Well 1','Well 2','Well 3'),caption = 'Table 1: Extracted Experimental Data')
+```
+
+<br/>
+Next we will extract Ct data from the excel workbook, using the sheet indices input above. This results in a dataframe containing all of the well labels and Ct values stored in the spreadsheet. Currently, this script assumes there is 1 reference gene and 1 target gene. In the future, this can be expanded. 
+
+```{r extract_data_eval_round3, eval=FALSE}
+#create data frame for reference genes
+data =  matrix(NA, nrow=p2, ncol=1)
+for (p in 1:p2) {
+data = read_excel("2019IB015_qPCR_20190217_annealingTemp57C.xlsx", sheet = as.integer(refSheet[p,1])) #GAPDH data
+
+#find row where quantfied data starts. This is where 'well' occurs always seems to be row 32. 
+endpt = nrow(data) 
+ref = data[c(33:endpt),c(1,3)] #this returns a data frame with well numbers in column 1 and Cq values in column 2
+names(ref) = c('Well','Ct')
+ref$Cq = as.numeric(ref$Ct)
+# add in a cbind call for when there is more than one reference gene
+}
+print(head(ref))
+
+#create data frame for target genes
+data =  matrix(NA, nrow=p2, ncol=1)
+for (p in 1:p3) {
+data = read_excel("2019IB015_qPCR_20190217_annealingTemp57C.xlsx", sheet = as.integer(goiSheet[p,1])) #GAPDH data
+
+#find row where quantfied data starts. This is where 'well' occurs always seems to be row 32. 
+endpt = nrow(data) 
+goi = data[c(33:endpt),c(1,3)] #this returns a data frame with well numbers in column 1 and Cq values in column 2
+names(goi) = c('Well','Ct')
+goi$Cq = as.numeric(goi$Ct)
+# add in a cbind call for when there is more than one reference gene
+}
+print(head(goi))
+```
+Next we will label the wells to reflect which experimental group they belong to. This is done by checking if our extracted sample data matched the well data generated from the user inputs. 
+
+```{r extract_data_eval_round4, eval=FALSE}
+temp =  matrix(NA, nrow=6, ncol=1)
+
+for (p in 1:nrow(ref)) {
+  #search extracted data from samples spreadsheet for matching wells with our ref/goi dataframes 
+  #wellInfo[p,2]
+  #ref[,1]
+  for (q in 1:nrow(wellInfo)) {
+checkmatch = match(ref[p,1],wellInfo[q,2])
+    if (!is.na(checkmatch)) {
+       temp[p,1] = stri_extract_first(wellInfo[q,1], regex="\\w+")
+    } 
+  }
+}
+ref$Group = temp
+
+
+# this will be buggy if there are more than 2 groups, correct at a later date.
+for (g in 1:(1+2)) {
+  if (is.na(ref$Group[g])) {
+    ref$Group[g] = ref$Group[1]
+  }
+}
+for (g in 4:(4+2)) {
+  if (is.na(ref$Group[g])) {
+    ref$Group[g] = ref$Group[4]
+  }
+}
+
+#repeat for GOI
+temp =  matrix(NA, nrow=6, ncol=1)
+
+for (p in 1:nrow(goi)) {
+  #search extracted data from samples spreadsheet for matching wells with our ref/goi dataframes 
+  for (q in 1:nrow(wellInfo)) {
+    checkmatch = match(goi[p,1],wellInfo[q,2])
+    if (!is.na(checkmatch)) {
+        temp[p,1] = stri_extract_first(wellInfo[q,1], regex="\\w+")
+    } 
+  }
+}
+goi$Group = temp
+
+for (g in 1:(1+2)) {
+  if (is.na(goi$Group[g])) {
+    goi$Group[g] = goi$Group[1]
+  }
+}
+for (g in 4:(4+2)) {
+  if (is.na(goi$Group[g])) {
+    goi$Group[g] = goi$Group[4]
+  }
+}
+```
+We now have dataframes that contain well numbers, Ct value, and group labels. Using this information we will perform the delta-delta Ct analysis to quantify relative gene expression
+
+```{r quantDATA, eval=FALSE}
+
+#raw Cq values
+
+if (ref$Group[1] != ref$Group[4]) {  #can turn this part into a formula probably, or figure out how to sort based off of unique labels
+  #mean Cq of triplicate data
+  meanREF1 = mean(ref$Cq[1:3])
+  meanREF2 = mean(ref$Cq[4:6])
+  
+  #find delta Cq- reference gene
+  dCqREF1 = (ref$Cq[1:3]) - meanREF1 #parental
+  dCqREF2 = (ref$Cq[4:6]) - meanREF2 #shYAP
+  
+  #find mean delta Cq- reference gene
+  meandCqREF1 = mean(dCqREF1)
+  meandCqREF2 = mean(dCqREF2)
+
+  #calculate delta-delta Cq- reference gene
+  ddCqREF1 = dCqREF1 - meandCqREF1
+  ddCqREF2 = dCqREF2 - meandCqREF1 
+
+  #calculate relative expression- reference gene by squaring ddCq for every well
+  reREF1 = 2^(-(ddCqREF1))
+  reREF2 = 2^(-(ddCqREF2))
+}
+
+if (goi$Group[1] != goi$Group[4]) {
+  #mean Cq of triplicate data
+  meanGOI1 = mean(goi$Cq[1:3])
+  meanGOI2 = mean(goi$Cq[4:6])
+  
+  #find delta Cq- reference gene
+  dCqGOI1 = (goi$Cq[1:3]) - meanREF1 #parental
+  dCqGOI2 = (goi$Cq[4:6]) - meanREF2 #shYAP
+  
+  #find mean delta Cq- reference gene
+  meandCqGOI1 = mean(dCqGOI1)
+  meandCqGOI2 = mean(dCqGOI2)
+
+  #calculate delta-delta Cq- reference gene
+  ddCqGOI1 = dCqGOI1 - meandCqGOI1
+  ddCqGOI2 = dCqGOI2 - meandCqGOI1 
+
+  #calculate relative expression- reference gene by squaring ddCq for every well
+  reGOI1 = 2^(-(ddCqGOI1))
+  reGOI2 = 2^(-(ddCqGOI2))
+  
+}
+
+```
+
+```{r visDATA, eval=FALSE}
+
+test = data.frame(c('reREF1','reREF1','reREF1','reREF2','reREF2','reREF2'),c(matrix(reREF1),matrix(reREF2)))
+names(test) = c('var','val')    
+
+## draw a box plot with dot plots overlaid (to show distribution transparently)
+p <- ggplot(test, aes(x = var,y = val))+
+  geom_boxplot(fill="white",lwd=1,fatten=1)
+
+
+p + theme(
+  plot.title = element_text(size = 16,face="bold",hjust = 0.5),
+  axis.title.x = element_text(size=16,face="bold"),
+  axis.title.y = element_text(size = 16,face="bold"),
+  axis.text.x = element_text(face = "bold",size = 14),
+  axis.text.y = element_text(face = 'bold',size = 14),
+  panel.border = element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  axis.line = element_line(color="black",size=1.5),
+  plot.background=element_rect(fill="white"),
+  panel.background=element_rect(fill="white"),
+  axis.ticks=element_line(size=1),
+  axis.ticks.length = unit(0.25,"cm"))
+
+test = data.frame(c('reGOI1','reGOI1','reGOI1','reGOI2','reGOI2','reGOI2'),c(matrix(reGOI1),matrix(reGOI2)))
+names(test) = c('var','val')    
+
+## draw a box plot with dot plots overlaid (to show distribution transparently)
+p <- ggplot(test, aes(x = var,y = val))+
+  geom_boxplot(fill="white",lwd=1,fatten=1)
+
+
+p + theme(
+  plot.title = element_text(size = 16,face="bold",hjust = 0.5),
+  axis.title.x = element_text(size=16,face="bold"),
+  axis.title.y = element_text(size = 16,face="bold"),
+  axis.text.x = element_text(face = "bold",size = 14),
+  axis.text.y = element_text(face = 'bold',size = 14),
+  panel.border = element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  axis.line = element_line(color="black",size=1.5),
+  plot.background=element_rect(fill="white"),
+  panel.background=element_rect(fill="white"),
+  axis.ticks=element_line(size=1),
+  axis.ticks.length = unit(0.25,"cm"))
+
+
+```
+```{r sesinfo, eval=FALSE}
+  sessionInfo()
+
+```
+
+### **Assumptions**
+The delta-delta Ct analysis method and this script rely on a few key assumptions:
+<br/> 
+**1.** Amplication efficiency should be equal between the target and reference genes.
+<br/> 
+**2.** Amplification efficiency is near perfect. 
+<br/> 
+**3.** Assays were run in triplicate.
+<br/> 
+**4.** There is 2 experimental groups, with 1 reference gene and 1 target gene. 
+
+
+### **Future Directions**
+**1.** Expand on the robustness and adaptability of this analysis script.
+<br/>
+**2.** Automate identification of the Ct threshold value from raw cycling data.
+<br/>
+**3.** Expand on analysis methods. 
+<br/>
+**4.** Incorporate proper statistical tests.
+<br/>
+
+
+
+
